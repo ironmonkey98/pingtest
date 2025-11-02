@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>无人机 WebRTC 自适应码流播放器</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 头部标题 -->
+        <header class="page-header">
+            <h1>无人机实时视频监控</h1>
+            <div class="header-status">
+                <span class="status-indicator" id="connectionStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">未连接</span>
+                </span>
+            </div>
+        </header>
+
+        <!-- 视频播放区域 -->
+        <div class="video-section">
+            <div class="video-container">
+                <video id="videoPlayer" autoplay playsinline muted></video>
+                <div class="video-overlay">
+                    <div class="quality-badge" id="qualityBadge">自动</div>
+                    <div class="loading-spinner" id="loadingSpinner" style="display: none;">
+                        <div class="spinner"></div>
+                        <span>加载中...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 控制面板 -->
+            <div class="control-panel">
+                <div class="control-group">
+                    <label class="control-label">码流选择</label>
+                    <div class="button-group">
+                        <button class="btn btn-secondary" data-quality="auto" id="btnAuto">
+                            <span>🤖 自动</span>
+                        </button>
+                        <button class="btn btn-default" data-quality="1080p" id="btn1080p">
+                            <span>1080P</span>
+                        </button>
+                        <button class="btn btn-default" data-quality="720p" id="btn720p">
+                            <span>720P</span>
+                        </button>
+                        <button class="btn btn-default" data-quality="480p" id="btn480p">
+                            <span>480P</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <button class="btn btn-primary" id="btnConnect">
+                        <span>🎬 开始播放</span>
+                    </button>
+                    <button class="btn btn-default" id="btnDisconnect" style="display: none;">
+                        <span>⏹️ 停止播放</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 监控面板 -->
+        <div class="monitor-section">
+            <!-- 网络状态卡片 -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>网络状态</h3>
+                    <span class="network-level" id="networkLevel">良好</span>
+                </div>
+                <div class="card-body">
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <span class="stat-label">网络类型</span>
+                            <span class="stat-value" id="networkType">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">有效带宽</span>
+                            <span class="stat-value" id="bandwidth">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">往返延迟 (RTT)</span>
+                            <span class="stat-value" id="rtt">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">下行速度</span>
+                            <span class="stat-value" id="downlink">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- WebRTC 统计卡片 -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>码流统计</h3>
+                    <span class="status-tag status-success" id="streamStatus">正常</span>
+                </div>
+                <div class="card-body">
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <span class="stat-label">视频码率</span>
+                            <span class="stat-value" id="videoBitrate">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">视频帧率</span>
+                            <span class="stat-value" id="videoFps">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">分辨率</span>
+                            <span class="stat-value" id="resolution">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">丢包率</span>
+                            <span class="stat-value" id="packetLoss">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">抖动 (Jitter)</span>
+                            <span class="stat-value" id="jitter">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">已接收帧数</span>
+                            <span class="stat-value" id="framesReceived">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 切换历史记录 -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>切换记录</h3>
+                    <button class="btn-icon" id="btnClearLog" title="清空记录">🗑️</button>
+                </div>
+                <div class="card-body">
+                    <div class="log-container" id="logContainer">
+                        <div class="log-empty">暂无切换记录</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript 模块 -->
+    <script src="js/network-monitor.js"></script>
+    <script src="js/webrtc-player-http.js"></script>
+    <script src="js/stats-collector.js"></script>
+    <script src="js/adaptive-controller.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

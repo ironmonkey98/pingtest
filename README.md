@@ -1,51 +1,54 @@
-# 无人机 WebRTC 自适应码流播放器
+# 多视图 WebRTC 播放与监控（HTTP/WHIP 默认）
 
-这是一个基于 WebRTC 的自适应码流播放器，能够根据网络状况自动切换 1080p、720p、480p 三种不同分辨率的视频流。
+本项目提供多宫格（1/4/9）实时监控方案，内置网络监测、WebRTC 统计聚合、智能画质建议与“主视图（⭐）优先”策略。默认使用 HTTP/WHIP 信令播放器，可选 SRS Simulcast 内核。
 
 ## 🎯 核心功能
 
-- ✅ **网络质量监测**：实时监测网络类型、带宽、延迟等指标
-- ✅ **WebRTC 统计采集**：采集视频码率、帧率、丢包率、抖动等数据
-- ✅ **自适应码流切换**：根据网络和播放质量自动切换分辨率
-- ✅ **手动切换模式**：支持手动选择指定分辨率
-- ✅ **实时监控面板**：可视化展示所有关键指标
-- ✅ **切换历史记录**：记录每次码流切换的时间和原因
+- ✅ 多宫格布局：单视图/四宫格/九宫格快速切换
+- ✅ 主视图（⭐）：一键设为主视图，高亮显示且优先保证画质
+- ✅ 网络与统计：聚合多路码率/帧率/丢包/抖动，总带宽与推荐布局
+- ✅ 智能建议：紧急降级/保守优化/质量提升/平衡优化，可手动或自动应用
+- ✅ 双内核：HTTP/WHIP（默认）；SRS Simulcast（可选）
 
 ## 📦 项目结构
 
 ```
-pingtest/
-├── index.html                 # 主页面
+.
+├── index.html                 # 多视图主页面（多宫格方案）
 ├── css/
-│   └── style.css             # 样式文件（遵循 UI 设计系统）
+│   └── style.css              # 样式（设计系统）
 ├── js/
-│   ├── network-monitor.js     # 网络监测模块
-│   ├── webrtc-player.js       # WebRTC 播放器模块
-│   ├── stats-collector.js     # 统计采集模块
-│   ├── adaptive-controller.js # 自适应控制器
-│   └── main.js               # 主控制逻辑
-└── README.md                 # 本文档
+│   ├── network-monitor.js     # 网络监测
+│   ├── webrtc-player-http.js  # HTTP/WHIP 播放器（默认）
+│   ├── webrtc-simulcast-player.js # 可选 Simulcast 播放器
+│   ├── stats-collector.js     # WebRTC 统计采集
+│   ├── multi-stream-stats.js  # 多流统计聚合与建议
+│   ├── smart-quality-controller.js # 智能画质控制
+│   ├── multi-view-manager.js  # 多视图管理与主视图(⭐)
+│   └── multi-view-app.js      # 应用编排与 UI 交互
+├── CODE_GUIDE.md              # 代码说明与集成指引
+└── README.md                  # 本文档
 ```
+
+> 📁 **关于 `_archive/` 目录**：存放开发过程中的历史文档、实验性功能和临时文件，详见 `_archive/README.md`。该目录已加入 `.gitignore`，不会提交到版本库。
 
 ## 🚀 快速开始
 
-### 1. 配置信令服务器
+### 1. 配置（HTTP/WHIP）
 
-打开 `js/main.js`，找到第 72-82 行，修改配置：
+修改 `js/multi-view-app.js` 中 `playerConfig.http`：
 
-```javascript
-this.player = new WebRTCPlayer(this.elements.videoPlayer, {
-    // 【重要】修改为你的信令服务器地址
-    signalingUrl: 'ws://your-server.com:8080/signal',
-
-    // 【重要】修改流 ID 模板（${quality} 会被替换为 1080p/720p/480p）
-    streamUrlTemplate: 'drone_${quality}',
-
-    // ICE 服务器配置（可选，默认使用 Google STUN）
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
-    ]
-});
+```js
+playerConfig: {
+  http: {
+    apiBaseUrl: 'https://glythgb.xmrbi.com/index/api/webrtc',
+    streamApp: 'live',
+    streamPrefix: 'stream/wrj/pri/8UUXN4E00A05CU_165-0-7',
+    streamType: 'play',
+    qualitySuffix: '' // 服务端未区分画质流名时留空
+  }
+},
+streamConfig: { provider: 'http' }
 ```
 
 ### 2. 启动 Web 服务器
@@ -74,139 +77,39 @@ http-server -p 8000
 - 安装 Live Server 扩展
 - 右键 `index.html` → "Open with Live Server"
 
-### 3. 使用播放器
+### 3. 使用多视图
 
-1. 打开浏览器访问页面
-2. 点击"开始播放"按钮
-3. 系统会自动根据当前网络推荐合适的分辨率
-4. 连接成功后，可以看到实时的网络和码流统计
-5. 可以手动切换分辨率，或保持自动模式
+1. 访问首页（index.html）
+2. 选择布局（单视图/四宫格/九宫格）
+3. 点击各视图“连接”开始播放；可点击“⭐”设为主视图
+4. 查看“多流统计/智能建议/切换记录”，按需手动或自动应用建议
 
-## 🔌 信令服务器接口
+## 🔌 HTTP/WHIP 接口说明（摘要）
 
-你的信令服务器需要支持以下 WebSocket 消息格式：
-
-### 客户端 → 服务器
-
-#### 1. Offer（播放请求）
-```json
-{
-  "type": "offer",
-  "sdp": "v=0\r\no=...",
-  "streamId": "drone_1080p"
-}
-```
-
-#### 2. ICE Candidate
-```json
-{
-  "type": "candidate",
-  "candidate": {
-    "candidate": "candidate:...",
-    "sdpMLineIndex": 0,
-    "sdpMid": "0"
-  }
-}
-```
-
-### 服务器 → 客户端
-
-#### 1. Answer（应答）
-```json
-{
-  "type": "answer",
-  "sdp": "v=0\r\no=..."
-}
-```
-
-#### 2. ICE Candidate
-```json
-{
-  "type": "candidate",
-  "candidate": {
-    "candidate": "candidate:...",
-    "sdpMLineIndex": 0,
-    "sdpMid": "0"
-  }
-}
-```
-
-#### 3. Error（错误）
-```json
-{
-  "type": "error",
-  "message": "流不存在或无法连接"
-}
-```
+通过 `POST ${apiBaseUrl}?app=${app}&stream=${streamPrefix}${qualitySuffix}&type=${type}` 提交 SDP Offer（Content-Type: application/sdp），返回 Answer（SDP 文本或 JSON 包含 sdp 字段）。
 
 ## ⚙️ 高级配置
 
-### 自适应策略调整
+### 策略与主视图
+- 智能建议由 `js/smart-quality-controller.js` 负责，可按布局与主视图调整优先级与建议强度。
 
-在 `js/main.js` 第 253 行，可以调整自适应控制器的参数：
+### 统计采集频率
+- `js/stats-collector.js` 中构造时的第二个参数为采集间隔（默认 1000ms）。
 
-```javascript
-this.adaptiveController = new AdaptiveController(
-    this.player,
-    this.networkMonitor,
-    this.statsCollector,
-    {
-        // 是否启用自动切换
-        autoSwitch: true,
-
-        // 切换冷却时间（毫秒）- 避免频繁切换
-        switchCooldown: 10000,
-
-        // 检查间隔（毫秒）
-        checkInterval: 3000,
-
-        // 质量档位定义
-        qualityLevels: ['1080p', '720p', '480p'],
-
-        // 质量要求阈值
-        qualityThresholds: {
-            '1080p': {
-                minBandwidth: 3.0,    // 最小带宽 3Mbps
-                maxRTT: 100,          // 最大延迟 100ms
-                maxPacketLoss: 2      // 最大丢包率 2%
-            },
-            '720p': {
-                minBandwidth: 1.5,    // 最小带宽 1.5Mbps
-                maxRTT: 150,          // 最大延迟 150ms
-                maxPacketLoss: 3      // 最大丢包率 3%
-            },
-            '480p': {
-                minBandwidth: 0.8,    // 最小带宽 0.8Mbps
-                maxRTT: 250,          // 最大延迟 250ms
-                maxPacketLoss: 5      // 最大丢包率 5%
-            }
-        }
-    }
-);
-```
-
-### 统计采集频率调整
-
-在 `js/main.js` 第 243 行，可以修改统计采集间隔：
-
-```javascript
-// 第二个参数是采集间隔（毫秒），默认 1000ms
-this.statsCollector = new WebRTCStatsCollector(peerConnection, 1000);
-```
-
-## 🏗️ 架构设计
-
-本项目严格遵循 SOLID 原则和工程最佳实践：
+## 🏗️ 架构设计与原则
 
 ### 模块职责（单一职责原则）
 
 | 模块 | 职责 | 文件 |
 |------|------|------|
 | **网络监测** | 监测网络类型、带宽、RTT | `network-monitor.js` |
-| **WebRTC 播放器** | 管理 WebRTC 连接、信令交互 | `webrtc-player.js` |
+| **HTTP 播放器** | HTTP/WHIP SDP 交换 | `webrtc-player-http.js` |
+| **Simulcast 播放器** | SRS + RID 切换 | `webrtc-simulcast-player.js` |
 | **统计采集** | 采集 WebRTC 统计数据 | `stats-collector.js` |
-| **自适应控制** | 决策码流切换策略 | `adaptive-controller.js` |
-| **主控制器** | 协调各模块、更新 UI | `main.js` |
+| **多流聚合** | 聚合/建议/网络评估 | `multi-stream-stats.js` |
+| **智能控制** | 建议与策略 | `smart-quality-controller.js` |
+| **多视图管理** | 视图/连接/主视图⭐ | `multi-view-manager.js` |
+| **应用编排** | UI/事件/弹窗 | `multi-view-app.js` |
 
 ### 设计原则应用
 
@@ -255,45 +158,38 @@ this.statsCollector = new WebRTCStatsCollector(peerConnection, 1000);
 
 ## 🐛 常见问题
 
-### 1. 信令服务器连接失败
+### 1. HTTP/WHIP 接口连接失败
 
-**原因**：信令服务器地址未配置或无法访问
+**原因**：接口不可达、参数错误或 CORS 限制
 
 **解决**：
-- 检查 `js/main.js` 中的 `signalingUrl` 配置
-- 确保信令服务器正常运行
-- 检查浏览器控制台的错误信息
+- 检查 `js/multi-view-app.js` 中 `playerConfig.http` 的 `apiBaseUrl/app/streamPrefix/type`
+- 确认服务端允许 `POST application/sdp` 且返回 Answer（文本或 JSON.sdp）
+- 检查浏览器控制台错误与网络面板请求/响应
 
 ### 2. Network Information API 不可用
 
-**原因**：浏览器不支持该 API
+**现象**：Safari/Firefox 对该 API 支持有限
 
-**解决**：系统会自动降级，使用默认值。建议使用 Chrome 或 Edge 浏览器以获得完整功能。
+**解决**：系统自动降级，仍可使用；建议 Chrome/Edge 以获得完整功能
 
-### 3. 视频无法播放
+### 3. 多视图无法全部连接
 
-**原因**：
-- WebRTC 连接失败
-- 流不存在
-- ICE 候选交换失败
+**原因**：服务端限制同一路流并发拉取
 
 **解决**：
-- 检查浏览器控制台的详细错误日志
-- 确认流媒体服务器已推送三路流（1080p/720p/480p）
-- 检查 STUN/TURN 服务器配置
+- 为每个视图提供独立 `streamPrefix[]` 或开启“质量映射”指向不同流
+- 仅连接主视图与少量辅视图，降低带宽与连接数
 
-### 4. 自动切换不生效
+### 4. 智能建议未自动应用
 
-**原因**：
-- 自动模式未启用
-- 在切换冷却期内
+**原因**：未开启“自动优化”或建议置信度不足
 
 **解决**：
-- 点击"自动"按钮启用自动模式
-- 等待冷却时间结束（默认 10 秒）
-- 检查控制台是否有错误日志
+- 点击“🤖 自动优化”开启；或在弹窗中手动“应用建议”
+- 可在 `smart-quality-controller.js` 调整置信度阈值
 
-## 📝 开发日志
+## 📝 开发日志（摘要）
 
 - ✅ 完成网络监测模块（Network Information API）
 - ✅ 完成 WebRTC 播放器模块（PeerConnection 管理）

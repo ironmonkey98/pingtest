@@ -1,369 +1,177 @@
 /**
- * WebRTC 播放器模块（HTTP 信令版本）
- * 职责：管理 WebRTC 连接、处理 HTTP 信令、切换码流
- * 原则：单一职责（SOLID-S）- 只负责 WebRTC 连接管理
- *
- * 适配基于 HTTP POST 的 WHIP 风格信令协议
+ * WebRTC 播放器模块（HTTP/WHIP 信令）
+ * 职责：管理 WebRTC 连接、通过 HTTP/WHIP 发送 SDP Offer 并接收 Answer；向外暴露统一事件
+ * 事件：
+ *  - stateChange: { state: 'connecting'|'connected'|'disconnected'|'error', quality?: string }
+ *  - error: { message, error }
+ *  - statsReady: RTCPeerConnection             // 可用于外部统计采集
  */
 class WebRTCPlayerHTTP {
-    constructor(videoElement, config = {}) {
-        this.videoElement = videoElement;
-        this.config = {
-            // ICE 服务器配置
-            iceServers: config.iceServers || [
-                { urls: 'stun:stun.l.google.com:19302' }
-            ],
-            // HTTP 信令 API 基础 URL
-            apiBaseUrl: config.apiBaseUrl || 'https://glythgb.xmrbi.com/index/api/webrtc',
-            // 流参数配置
-            streamApp: config.streamApp || 'live',
-            streamPrefix: config.streamPrefix || 'stream/wrj/pri/8UUXN4R00A06RS_165-0-7',
-            streamType: config.streamType || 'play',
-            // 质量后缀模板（可选）
-            qualitySuffix: config.qualitySuffix || '', // 例如: '_${quality}' 或 '-${quality}'
-            ...config
-        };
+  constructor(videoElement, config = {}) {
+    if (!videoElement) throw new Error('WebRTCPlayerHTTP 需要有效的视频元素');
 
-        this.peerConnection = null;
-        this.currentQuality = null;
-        this.isConnecting = false;
-        this.listeners = {
-            stateChange: [],
-            error: [],
-            statsReady: []
-        };
+    this.videoElement = videoElement;
+    this.config = {
+      iceServers: config.iceServers || [{ urls: 'stun:stun.l.google.com:19302' }],
+      apiBaseUrl: config.apiBaseUrl || '',
+      streamApp: config.streamApp || 'live',
+      streamPrefix: config.streamPrefix || '',
+      streamType: config.streamType || 'play',
+      qualitySuffix: config.qualitySuffix || '', // e.g. '-${quality}'
+      ...config
+    };
 
-        console.log('WebRTC 播放器（HTTP 版本）初始化完成', this.config);
+    this.peerConnection = null;
+    this.currentQuality = null;
+    this.isConnecting = false;
+    this.listeners = { stateChange: [], error: [], statsReady: [], qualityChanged: [] };
+
+    if (!this.config.apiBaseUrl || !this.config.streamPrefix) {
+      console.warn('WebRTCPlayerHTTP: apiBaseUrl/streamPrefix 未配置，连接将失败');
     }
 
-    /**
-     * 连接到指定质量的流
-     * @param {string} quality - '1080p' | '720p' | '480p'
-     * @returns {Promise<void>}
-     */
-    async connect(quality) {
-        if (this.isConnecting) {
-            console.warn('正在连接中，请勿重复操作');
-            return;
+    console.log('WebRTC 播放器（HTTP 版本）初始化完成', this.config);
+  }
+
+  // 事件系统
+  on(event, cb) {
+    if (this.listeners[event]) this.listeners[event].push(cb);
+  }
+  off(event, cb) {
+    if (this.listeners[event]) this.listeners[event] = this.listeners[event].filter(fn => fn !== cb);
+  }
+  emit(event, data) {
+    if (!this.listeners[event]) return;
+    this.listeners[event].forEach(fn => { try { fn(data); } catch (e) { console.error(e); } });
+  }
+
+  async connect(quality = '480p') {
+    if (this.isConnecting) return;
+    this.isConnecting = true;
+    this.currentQuality = quality;
+    this.emit('stateChange', { state: 'connecting', quality });
+
+    try {
+      this._createPeerConnection();
+      const offer = await this._createOffer();
+      const answer = await this._sendOfferAndGetAnswer(offer, quality);
+      await this.peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answer.sdp }));
+      this.emit('stateChange', { state: 'connected', quality });
+    } catch (error) {
+      console.error('连接失败:', error);
+      this.emit('error', { message: '连接失败', error });
+      this.emit('stateChange', { state: 'error', quality });
+      throw error;
+    } finally {
+      this.isConnecting = false;
+    }
+  }
+
+  async switchQuality(newQuality) {
+    if (newQuality === this.currentQuality) return;
+    this.disconnect();
+    await new Promise(r => setTimeout(r, 300));
+    await this.connect(newQuality);
+    this.emit('qualityChanged', { oldRid: null, newRid: newQuality, label: newQuality });
+  }
+
+  disconnect() {
+    if (this.peerConnection) {
+      this.peerConnection.getSenders().forEach(s => s.track && s.track.stop());
+      this.peerConnection.getReceivers().forEach(r => r.track && r.track.stop());
+      this.peerConnection.close();
+      this.peerConnection = null;
+    }
+    if (this.videoElement.srcObject) {
+      this.videoElement.srcObject.getTracks().forEach(t => t.stop());
+      this.videoElement.srcObject = null;
+    }
+    this.emit('stateChange', { state: 'disconnected', quality: this.currentQuality });
+  }
+
+  getPeerConnection() { return this.peerConnection; }
+  getCurrentQuality() { return this.currentQuality; }
+
+  _createPeerConnection() {
+    this.peerConnection = new RTCPeerConnection({ iceServers: this.config.iceServers });
+
+    this.peerConnection.onicecandidate = (e) => {
+      if (e.candidate) console.debug('ICE 候选:', e.candidate.candidate);
+    };
+    this.peerConnection.onicegatheringstatechange = () => {
+      console.log('ICE 收集状态:', this.peerConnection.iceGatheringState);
+    };
+    this.peerConnection.onconnectionstatechange = () => {
+      const state = this.peerConnection.connectionState;
+      console.log('连接状态:', state);
+      if (state === 'connected') this.emit('stateChange', { state: 'connected', quality: this.currentQuality });
+      if (state === 'failed' || state === 'closed') this.emit('stateChange', { state: 'disconnected', quality: this.currentQuality });
+    };
+    this.peerConnection.ontrack = (event) => {
+      if (event.streams && event.streams[0]) {
+        this.videoElement.srcObject = event.streams[0];
+        this.emit('statsReady', this.peerConnection);
+      }
+    };
+
+    console.log('PeerConnection 创建成功');
+  }
+
+  async _createOffer() {
+    // 仅接收音视频
+    this.peerConnection.addTransceiver('video', { direction: 'recvonly' });
+    this.peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+
+    const offer = await this.peerConnection.createOffer();
+    await this.peerConnection.setLocalDescription(offer);
+    await this._waitForIceGathering();
+    console.log('Offer 创建成功');
+    return this.peerConnection.localDescription;
+  }
+
+  _waitForIceGathering() {
+    return new Promise(resolve => {
+      if (this.peerConnection.iceGatheringState === 'complete') return resolve();
+      const onState = () => {
+        if (this.peerConnection.iceGatheringState === 'complete') {
+          this.peerConnection.removeEventListener('icegatheringstatechange', onState);
+          resolve();
         }
+      };
+      this.peerConnection.addEventListener('icegatheringstatechange', onState);
+      setTimeout(() => {
+        this.peerConnection.removeEventListener('icegatheringstatechange', onState);
+        resolve();
+      }, 5000);
+    });
+  }
 
-        try {
-            this.isConnecting = true;
-            this.currentQuality = quality;
-            this.emit('stateChange', { state: 'connecting', quality });
+  async _sendOfferAndGetAnswer(offer, quality) {
+    const base = this.config.apiBaseUrl.replace(/\/$/, '');
+    const suffix = (this.config.qualitySuffix || '').replace('${quality}', quality || '');
+    const streamId = `${this.config.streamPrefix}${suffix}`;
+    const url = `${base}?app=${encodeURIComponent(this.config.streamApp)}&stream=${encodeURIComponent(streamId)}&type=${encodeURIComponent(this.config.streamType)}`;
 
-            console.log(`开始连接 ${quality} 流...`);
-
-            // 1. 创建 PeerConnection
-            this.createPeerConnection();
-
-            // 2. 创建 Offer
-            const offer = await this.createOffer();
-
-            // 3. 通过 HTTP POST 发送 Offer 并获取 Answer
-            const answer = await this.sendOfferAndGetAnswer(offer, quality);
-
-            // 4. 设置远端描述
-            await this.peerConnection.setRemoteDescription(
-                new RTCSessionDescription({
-                    type: 'answer',
-                    sdp: answer.sdp
-                })
-            );
-
-            console.log(`${quality} 流连接成功`);
-            this.emit('stateChange', { state: 'connected', quality });
-
-        } catch (error) {
-            console.error('连接失败:', error);
-            this.emit('error', { message: '连接失败', error });
-            this.emit('stateChange', { state: 'error', quality });
-            throw error;
-        } finally {
-            this.isConnecting = false;
-        }
+    console.log('发送 Offer 到:', url);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: offer.sdp });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${text}`);
     }
-
-    /**
-     * 切换到新的质量
-     * @param {string} newQuality - 新的质量档位
-     * @returns {Promise<void>}
-     */
-    async switchQuality(newQuality) {
-        if (newQuality === this.currentQuality) {
-            console.log('已经是当前质量，无需切换');
-            return;
-        }
-
-        console.log(`切换码流: ${this.currentQuality} -> ${newQuality}`);
-
-        // 先断开当前连接
-        this.disconnect();
-
-        // 短暂延迟后重新连接
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // 连接到新质量
-        await this.connect(newQuality);
+    const ct = res.headers.get('Content-Type') || '';
+    if (ct.includes('application/json')) {
+      const data = await res.json();
+      if (data.code && data.code !== 0) throw new Error(`服务器错误(${data.code}): ${data.msg || 'unknown'}`);
+      const sdp = data.sdp || (data.data && data.data.sdp);
+      if (!sdp) throw new Error('响应中缺少 sdp');
+      return { sdp };
     }
-
-    /**
-     * 创建 PeerConnection
-     */
-    createPeerConnection() {
-        const config = {
-            iceServers: this.config.iceServers
-        };
-
-        this.peerConnection = new RTCPeerConnection(config);
-
-        // 监听 ICE 候选（HTTP 信令中，ICE 候选通常在 SDP 中 trickle）
-        this.peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                console.log('ICE 候选:', event.candidate);
-                // HTTP 信令模式下，通常不需要额外发送 ICE 候选
-                // 因为 SDP 中已经包含了 ICE 信息
-            }
-        };
-
-        // 等待所有 ICE 候选收集完成
-        this.peerConnection.onicegatheringstatechange = () => {
-            console.log('ICE 收集状态:', this.peerConnection.iceGatheringState);
-        };
-
-        // 监听连接状态变化
-        this.peerConnection.onconnectionstatechange = () => {
-            const state = this.peerConnection.connectionState;
-            console.log('连接状态:', state);
-
-            if (state === 'connected') {
-                this.emit('stateChange', { state: 'connected', quality: this.currentQuality });
-            } else if (state === 'failed' || state === 'closed') {
-                this.emit('stateChange', { state: 'disconnected', quality: this.currentQuality });
-            }
-        };
-
-        // 监听媒体流
-        this.peerConnection.ontrack = (event) => {
-            console.log('接收到媒体流:', event.streams[0]);
-            this.videoElement.srcObject = event.streams[0];
-            this.emit('statsReady', this.peerConnection);
-        };
-
-        console.log('PeerConnection 创建成功');
-    }
-
-    /**
-     * 创建 Offer
-     * @returns {Promise<RTCSessionDescriptionInit>}
-     */
-    async createOffer() {
-        try {
-            // 添加 transceiver 用于接收视频和音频
-            this.peerConnection.addTransceiver('video', { direction: 'recvonly' });
-            this.peerConnection.addTransceiver('audio', { direction: 'recvonly' });
-
-            // 创建 Offer
-            const offer = await this.peerConnection.createOffer();
-            await this.peerConnection.setLocalDescription(offer);
-
-            // 等待 ICE 候选收集完成（可选，但推荐）
-            await this.waitForIceGathering();
-
-            console.log('Offer 创建成功');
-            return this.peerConnection.localDescription;
-
-        } catch (error) {
-            console.error('创建 Offer 失败:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * 等待 ICE 候选收集完成
-     * @returns {Promise<void>}
-     */
-    waitForIceGathering() {
-        return new Promise((resolve) => {
-            if (this.peerConnection.iceGatheringState === 'complete') {
-                resolve();
-                return;
-            }
-
-            const checkState = () => {
-                if (this.peerConnection.iceGatheringState === 'complete') {
-                    this.peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                    resolve();
-                }
-            };
-
-            this.peerConnection.addEventListener('icegatheringstatechange', checkState);
-
-            // 超时保护（5 秒）
-            setTimeout(() => {
-                this.peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                resolve();
-            }, 5000);
-        });
-    }
-
-    /**
-     * 通过 HTTP POST 发送 Offer 并获取 Answer
-     * @param {RTCSessionDescriptionInit} offer - Offer SDP
-     * @param {string} quality - 质量档位
-     * @returns {Promise<Object>} Answer SDP
-     */
-    async sendOfferAndGetAnswer(offer, quality) {
-        try {
-            // 构建流 ID（带质量后缀）
-            const streamId = this.getStreamId(quality);
-
-            // 构建完整 URL
-            const url = `${this.config.apiBaseUrl}?app=${this.config.streamApp}&stream=${streamId}&type=${this.config.streamType}`;
-
-            console.log('发送 Offer 到:', url);
-
-            // 发送 HTTP POST 请求
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/sdp'
-                },
-                body: offer.sdp
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`HTTP ${response.status}: ${errorText}`);
-            }
-
-            // 解析响应
-            const contentType = response.headers.get('Content-Type');
-
-            if (contentType && contentType.includes('application/json')) {
-                // JSON 格式响应
-                const data = await response.json();
-
-                if (data.code !== 0) {
-                    throw new Error(`服务器错误 (${data.code}): ${data.msg}`);
-                }
-
-                return {
-                    sdp: data.sdp || data.data?.sdp
-                };
-            } else {
-                // 直接 SDP 格式响应
-                const sdp = await response.text();
-                return { sdp };
-            }
-
-        } catch (error) {
-            console.error('发送 Offer 失败:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * 获取流 ID（包含质量后缀）
-     * @param {string} quality - 质量档位
-     * @returns {string}
-     */
-    getStreamId(quality) {
-        const suffix = this.config.qualitySuffix.replace('${quality}', quality);
-        return this.config.streamPrefix + suffix;
-    }
-
-    /**
-     * 断开连接
-     */
-    disconnect() {
-        console.log('断开连接...');
-
-        // 关闭 PeerConnection
-        if (this.peerConnection) {
-            this.peerConnection.close();
-            this.peerConnection = null;
-        }
-
-        // 清空视频
-        if (this.videoElement.srcObject) {
-            this.videoElement.srcObject.getTracks().forEach(track => track.stop());
-            this.videoElement.srcObject = null;
-        }
-
-        this.currentQuality = null;
-        this.emit('stateChange', { state: 'disconnected' });
-    }
-
-    /**
-     * 获取当前质量
-     * @returns {string|null}
-     */
-    getCurrentQuality() {
-        return this.currentQuality;
-    }
-
-    /**
-     * 获取 PeerConnection（用于统计采集）
-     * @returns {RTCPeerConnection|null}
-     */
-    getPeerConnection() {
-        return this.peerConnection;
-    }
-
-    /**
-     * 添加事件监听器
-     * @param {string} event - 事件名称
-     * @param {Function} callback - 回调函数
-     */
-    on(event, callback) {
-        if (this.listeners[event]) {
-            this.listeners[event].push(callback);
-        }
-    }
-
-    /**
-     * 移除事件监听器
-     * @param {string} event - 事件名称
-     * @param {Function} callback - 回调函数
-     */
-    off(event, callback) {
-        if (this.listeners[event]) {
-            this.listeners[event] = this.listeners[event].filter(cb => cb !== callback);
-        }
-    }
-
-    /**
-     * 触发事件
-     * @param {string} event - 事件名称
-     * @param {*} data - 事件数据
-     */
-    emit(event, data) {
-        if (this.listeners[event]) {
-            this.listeners[event].forEach(callback => {
-                try {
-                    callback(data);
-                } catch (error) {
-                    console.error(`事件 ${event} 的监听器执行出错:`, error);
-                }
-            });
-        }
-    }
-
-    /**
-     * 销毁实例
-     */
-    destroy() {
-        this.disconnect();
-        this.listeners = {
-            stateChange: [],
-            error: [],
-            statsReady: []
-        };
-    }
+    const sdp = await res.text();
+    return { sdp };
+  }
 }
 
-// 导出为全局变量
 if (typeof window !== 'undefined') {
-    window.WebRTCPlayerHTTP = WebRTCPlayerHTTP;
+  window.WebRTCPlayerHTTP = WebRTCPlayerHTTP;
 }
+

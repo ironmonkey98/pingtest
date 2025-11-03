@@ -68,19 +68,25 @@ class MultiViewApplication {
         this.config = {
             // WebRTC 播放器配置
             playerConfig: {
-                apiBaseUrl: 'https://glythgb.xmrbi.com/index/api/webrtc',
-                streamApp: 'live',
-                streamPrefix: 'stream/wrj/pri/8UUXN4R00A06RS_165-0-7',
-                streamType: 'play',
-                qualitySuffix: '',
+                // Simulcast/SRS 用（未启用时可忽略）
+                apiBaseUrl: 'http://localhost:1985',
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' }
-                ]
+                ],
+                // HTTP 信令（WHIP 风格）用配置
+                http: {
+                    apiBaseUrl: 'https://glythgb.xmrbi.com/index/api/webrtc',
+                    streamApp: 'live',
+                    streamPrefix: 'stream/wrj/pri/8UUXN4E00A05CU_165-0-7',
+                    streamType: 'play',
+                    qualitySuffix: ''
+                }
             },
-            
+
             // 流配置
             streamConfig: {
-                baseStreamId: 'stream/wrj/pri/8UUXN4R00A06RS_165-0-7',
+                provider: 'http', // 使用HTTP信令播放器
+                baseStreamId: 'webrtc://localhost/live/stream', // 兼容Simulcast时使用
                 useMultipleStreams: false // 使用同一个流
             },
             
@@ -156,6 +162,7 @@ class MultiViewApplication {
         // 设置模块间的关联
         this.smartQualityController.setNetworkMonitor(this.networkMonitor);
         this.smartQualityController.setMultiStreamStats(this.multiStreamStats);
+        this.multiViewManager.setMultiStreamStats(this.multiStreamStats);
     }
 
     /**
@@ -249,6 +256,10 @@ class MultiViewApplication {
 
         this.multiViewManager.on('error', (event) => {
             this.handleError(event);
+        });
+
+        this.multiViewManager.on('primaryChange', (event) => {
+            this.handlePrimaryChange(event);
         });
 
         // 多流统计事件
@@ -486,6 +497,16 @@ class MultiViewApplication {
     handleNetworkChange(event) {
         console.log('网络状况变化:', event);
         this.addLog(`网络状况变化: ${event.changeType}`, 'warning');
+    }
+
+    /**
+     * 处理主视图切换
+     * @param {Object} event - { previousIndex, newIndex }
+     */
+    handlePrimaryChange(event) {
+        const { previousIndex, newIndex } = event || {};
+        this.smartQualityController.setPrimaryIndex(newIndex);
+        this.addLog(`主视图切换：#${(previousIndex ?? 0) + 1} → #${(newIndex ?? 0) + 1}`, 'info');
     }
 
     /**

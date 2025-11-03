@@ -86,6 +86,7 @@ class SmartQualityController {
         this.networkMonitor = null;
         this.multiStreamStats = null;
         this.currentLayout = 'single';
+        this.primaryIndex = 0; // 主视图索引
         this.lastSwitchTimes = new Map(); // 记录每个流的最后切换时间
         this.stabilityTracker = new Map(); // 稳定性跟踪
         this.userPreferences = new Map(); // 用户偏好记录
@@ -139,6 +140,22 @@ class SmartQualityController {
         
         // 触发布局变更的画质策略调整
         this.adjustStrategyForLayout(layout);
+    }
+
+    /**
+     * 设置主视图索引
+     * @param {number} index - 主视图
+     */
+    setPrimaryIndex(index) {
+        const prev = this.primaryIndex;
+        this.primaryIndex = index;
+        this.emit('strategyChange', {
+            layout: this.currentLayout,
+            strategy: { type: 'primary_change' },
+            recommendations: [{ type: 'primary_stream_update', streamIndex: index, reason: '用户设置主视图' }],
+            timestamp: Date.now()
+        });
+        console.log(`主视图变更: ${prev} -> ${index}`);
     }
 
     /**
@@ -211,7 +228,8 @@ class SmartQualityController {
         const recommendations = [];
         const strategy = this.config.layoutStrategies.grid4;
 
-        // 主流（通常是第一个）使用较高画质
+        // 主流使用较高画质（由用户选择的主视图）
+        const primary = Math.min(this.primaryIndex ?? 0, Math.max(0, activeStreams.length - 1));
         if (activeStreams.length > 0) {
             const primaryQuality = this.determineOptimalQuality(
                 strategy.primaryStreamQuality,
@@ -221,14 +239,15 @@ class SmartQualityController {
 
             recommendations.push({
                 type: 'primary_stream_quality',
-                streamIndex: 0,
+                streamIndex: primary,
                 recommendedQuality: primaryQuality,
                 reason: '主视频流，建议使用较高画质以保证观看体验'
             });
         }
 
         // 其他流使用中等画质
-        for (let i = 1; i < Math.min(4, activeStreams.length); i++) {
+        for (let i = 0; i < Math.min(4, activeStreams.length); i++) {
+            if (i === primary) continue;
             const secondaryQuality = this.determineOptimalQuality(
                 strategy.preferredQuality,
                 networkAssessment,
@@ -317,9 +336,20 @@ class SmartQualityController {
      * @returns {string} 层级
      */
     getStreamTier(streamIndex) {
-        if (streamIndex === 0) return 'tier0'; // 主流
-        if (streamIndex < 4) return 'tier1';   // 前4个流
-        return 'tier2';                        // 其他流
+        // 主视图永远是 tier0
+        if (streamIndex === this.primaryIndex) return 'tier0';
+
+        // 根据布局粗粒度分层，保持KISS
+        switch (this.currentLayout) {
+            case 'single':
+                return 'tier0';
+            case 'grid4':
+                return 'tier1';
+            case 'grid9':
+                return streamIndex < 4 ? 'tier1' : 'tier2';
+            default:
+                return 'tier1';
+        }
     }
 
     /**

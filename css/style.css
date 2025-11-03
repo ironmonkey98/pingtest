@@ -579,6 +579,28 @@ body {
     justify-content: center;
 }
 
+/* 主视图高亮 */
+.video-view.primary {
+    outline: 3px solid var(--primary-color);
+    box-shadow: 0 0 0 4px var(--primary-light);
+}
+
+/* 置为主视图按钮 */
+.pin-btn {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+}
+.pin-btn:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+.pin-btn.is-primary {
+    background: var(--primary-color);
+    color: #fff;
+    border-color: var(--primary-color);
+}
+
 .video-view video {
     width: 100%;
     height: 100%;

@@ -15,6 +15,8 @@ class NetworkMonitor {
         };
         this.listeners = [];
         this.monitorInterval = null;
+        this.lastBandwidthTest = null;
+        this.bandwidthTestInterval = null;
 
         this.init();
     }
@@ -39,21 +41,66 @@ class NetworkMonitor {
 
         // 启动定期监测
         this.startMonitoring();
+
+        // 启动实际带宽测试（每30秒一次）
+        this.startBandwidthTesting();
     }
 
     /**
      * 更新网络信息
      */
     updateNetworkInfo() {
-        if (!this.connection) return;
+        if (this.connection) {
+            // 使用API数据，但设置合理的默认值
+            this.networkInfo = {
+                type: this.connection.type || '未知',
+                effectiveType: this.connection.effectiveType || '4g',
+                downlink: this.connection.downlink || this.getReasonableDefaultBandwidth(),
+                rtt: this.connection.rtt || this.getReasonableDefaultRTT(),
+                saveData: this.connection.saveData || false,
+                isAPIData: true
+            };
+        } else {
+            // 浏览器不支持时的降级方案
+            this.networkInfo = {
+                type: '未知',
+                effectiveType: '4g', 
+                downlink: this.getReasonableDefaultBandwidth(),
+                rtt: this.getReasonableDefaultRTT(),
+                saveData: false,
+                isAPIData: false
+            };
+        }
+    }
 
-        this.networkInfo = {
-            type: this.connection.type || '未知',
-            effectiveType: this.connection.effectiveType || '4g',
-            downlink: this.connection.downlink || 10, // Mbps
-            rtt: this.connection.rtt || 50, // ms
-            saveData: this.connection.saveData || false
+    /**
+     * 获取合理的默认带宽（基于网络类型）
+     */
+    getReasonableDefaultBandwidth() {
+        const connectionType = this.connection?.effectiveType || '4g';
+        const defaults = {
+            'slow-2g': 0.1,
+            '2g': 0.3,
+            '3g': 1.5,
+            '4g': 15.0,  // 现代4G应该有更高带宽
+            '5g': 50.0
         };
+        return defaults[connectionType] || 15.0;
+    }
+
+    /**
+     * 获取合理的默认RTT（基于网络类型）
+     */
+    getReasonableDefaultRTT() {
+        const connectionType = this.connection?.effectiveType || '4g';
+        const defaults = {
+            'slow-2g': 1000,
+            '2g': 500,
+            '3g': 200,
+            '4g': 80,    // 现代4G的RTT应该更低
+            '5g': 30
+        };
+        return defaults[connectionType] || 80;
     }
 
     /**
@@ -215,10 +262,154 @@ class NetworkMonitor {
     }
 
     /**
+     * 启动实际带宽测试
+     */
+    startBandwidthTesting() {
+        // 立即执行一次测试
+        this.performBandwidthTest();
+        
+        // 每30秒测试一次
+        this.bandwidthTestInterval = setInterval(() => {
+            this.performBandwidthTest();
+        }, 30000);
+    }
+
+    /**
+     * 执行实际带宽测试
+     */
+    async performBandwidthTest() {
+        try {
+            // 使用测试图片来进行真实网络测试
+            const testUrls = [
+                'https://httpbin.org/bytes/51200', // 50KB
+                'https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png',
+                'https://www.baidu.com/img/baidu_jgylogo3.gif'
+            ];
+            
+            let bestSpeed = 0;
+            let successfulTests = 0;
+            
+            for (const testUrl of testUrls) {
+                try {
+                    const startTime = performance.now();
+                    const response = await fetch(testUrl + '?_t=' + Date.now(), {
+                        cache: 'no-cache',
+                        mode: 'cors'
+                    });
+                    
+                    if (!response.ok) continue;
+                    
+                    const data = await response.blob();
+                    const endTime = performance.now();
+                    
+                    const duration = (endTime - startTime) / 1000; // 秒
+                    const sizeBytes = data.size;
+                    const speedMbps = (sizeBytes * 8) / (duration * 1000000); // Mbps
+                    
+                    if (speedMbps > bestSpeed) {
+                        bestSpeed = speedMbps;
+                    }
+                    
+                    successfulTests++;
+                    
+                    console.log(`测试 ${testUrl}: ${speedMbps.toFixed(2)} Mbps (${sizeBytes} bytes, ${duration.toFixed(2)}s)`);
+                    
+                    // 如果有一个成功的测试就够了
+                    break;
+                    
+                } catch (error) {
+                    console.warn(`测试 ${testUrl} 失败:`, error);
+                    continue;
+                }
+            }
+            
+            if (successfulTests > 0) {
+                this.lastBandwidthTest = {
+                    measuredBandwidth: Math.max(bestSpeed, 0.1), // 最低0.1Mbps
+                    timestamp: Date.now(),
+                    testMethod: 'real_download'
+                };
+
+                // 更新网络信息，优先使用测试结果
+                this.updateNetworkInfoWithTest();
+                
+                console.log(`实际带宽测试完成: ${bestSpeed.toFixed(2)} Mbps`);
+            } else {
+                console.warn('所有带宽测试都失败，使用API数据');
+            }
+            
+        } catch (error) {
+            console.warn('带宽测试失败:', error);
+            // 测试失败时使用API数据
+        }
+    }
+
+    /**
+     * 生成测试数据
+     */
+    generateTestData(size) {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        let result = '';
+        for (let i = 0; i < size; i++) {
+            result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return btoa(result);
+    }
+
+    /**
+     * 使用测试结果更新网络信息
+     */
+    updateNetworkInfoWithTest() {
+        if (this.lastBandwidthTest) {
+            const testAge = Date.now() - this.lastBandwidthTest.timestamp;
+            
+            // 如果测试结果在60秒内，使用测试结果
+            if (testAge < 60000) {
+                const apiData = this.connection ? {
+                    type: this.connection.type || '未知',
+                    effectiveType: this.connection.effectiveType || '4g',
+                    downlink: this.connection.downlink,
+                    rtt: this.connection.rtt,
+                    saveData: this.connection.saveData || false
+                } : null;
+
+                // 优先使用实际测试的带宽，API的RTT通常比较准确
+                this.networkInfo = {
+                    type: apiData?.type || '未知',
+                    effectiveType: apiData?.effectiveType || '4g',
+                    downlink: this.lastBandwidthTest.measuredBandwidth,
+                    rtt: apiData?.rtt || this.getReasonableDefaultRTT(),
+                    saveData: apiData?.saveData || false,
+                    isAPIData: false,
+                    isTested: true,
+                    testAge: Math.round(testAge / 1000) // 秒
+                };
+                
+                console.log(`使用实际测试带宽: ${this.lastBandwidthTest.measuredBandwidth.toFixed(2)} Mbps`);
+                return;
+            }
+        }
+        
+        // 回退到原来的方法
+        this.updateNetworkInfo();
+    }
+
+    /**
+     * 停止带宽测试
+     */
+    stopBandwidthTesting() {
+        if (this.bandwidthTestInterval) {
+            clearInterval(this.bandwidthTestInterval);
+            this.bandwidthTestInterval = null;
+        }
+    }
+
+    /**
      * 销毁实例
      */
     destroy() {
         this.stopMonitoring();
+        this.stopBandwidthTesting();
         this.listeners = [];
 
         if (this.connection) {

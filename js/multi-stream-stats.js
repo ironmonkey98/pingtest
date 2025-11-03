@@ -113,6 +113,18 @@ class MultiStreamStatsCollector {
     }
 
     /**
+     * 更新流的元数据（例如优先级）
+     * @param {string} streamId - 流ID
+     * @param {Object} partial - 局部元数据
+     */
+    updateStreamMetadata(streamId, partial = {}) {
+        const streamInfo = this.streamStats.get(streamId);
+        if (!streamInfo) return;
+        streamInfo.metadata = { ...streamInfo.metadata, ...partial };
+        console.log(`更新流元数据: ${streamId}`, streamInfo.metadata);
+    }
+
+    /**
      * 移除流监控
      * @param {string} streamId - 流ID
      */
@@ -358,12 +370,22 @@ class MultiStreamStatsCollector {
         }, 0);
         assessment.metrics.averageQualityScore = Math.round(totalQualityScore / activeStreams.length);
 
-        // 评估带宽状况
+        // 评估带宽状况 - 基于实际性能而非硬编码阈值
         const bandwidthMbps = parseFloat(assessment.metrics.totalBandwidthUsage);
-        if (bandwidthMbps > this.config.bandwidthThresholds.high) {
+        
+        // 计算实际网络性能指标
+        const avgPacketLoss = activeStreams.reduce((sum, stream) => 
+            sum + parseFloat(stream.currentStats.packetLossRate || 0), 0) / activeStreams.length;
+        const avgJitter = activeStreams.reduce((sum, stream) => 
+            sum + (stream.currentStats.jitter || 0), 0) / activeStreams.length;
+        const avgFps = activeStreams.reduce((sum, stream) => 
+            sum + (stream.currentStats.videoFps || 0), 0) / activeStreams.length;
+        
+        // 基于实际性能判断带宽状况
+        if (avgPacketLoss > 3 || avgJitter > 100 || avgFps < 20) {
             assessment.bandwidth = 'overloaded';
-            assessment.recommendations.push('建议减少同时观看的视频数量或降低画质');
-        } else if (bandwidthMbps > this.config.bandwidthThresholds.medium) {
+            assessment.recommendations.push(`网络性能不佳 (丢包率:${avgPacketLoss.toFixed(1)}%, 延迟:${avgJitter.toFixed(0)}ms), 建议降低画质`);
+        } else if (avgPacketLoss > 1.5 || avgJitter > 60 || avgFps < 25) {
             assessment.bandwidth = 'moderate';
             assessment.recommendations.push('网络负载较高，建议使用自动画质调节');
         } else {
@@ -386,10 +408,10 @@ class MultiStreamStatsCollector {
             assessment.stability = 'stable';
         }
 
-        // 评估网络压力等级
-        if (bandwidthMbps > this.config.bandwidthThresholds.high || problematicStreams.length > 2) {
+        // 评估网络压力等级 - 基于实际性能
+        if (avgPacketLoss > 2 || avgJitter > 80 || problematicStreams.length > 2) {
             assessment.metrics.networkStressLevel = 'high';
-        } else if (bandwidthMbps > this.config.bandwidthThresholds.medium || problematicStreams.length > 0) {
+        } else if (avgPacketLoss > 1 || avgJitter > 50 || problematicStreams.length > 0) {
             assessment.metrics.networkStressLevel = 'medium';
         } else {
             assessment.metrics.networkStressLevel = 'low';

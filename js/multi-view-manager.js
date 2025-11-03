@@ -20,9 +20,11 @@ class MultiViewManager {
 
         // 当前状态
         this.currentLayout = this.config.defaultLayout;
+        this.primaryIndex = 0; // 主视图索引
         this.videoPlayers = new Map(); // 视频播放器实例映射
         this.viewStats = new Map(); // 每个视图的统计信息
         this.activeStreams = new Set(); // 活跃的流ID集合
+        this.multiStreamStats = null; // 多流统计收集器引用
         
         // 布局配置
         this.layouts = {
@@ -36,10 +38,20 @@ class MultiViewManager {
             layoutChange: [],
             streamStats: [],
             qualitySwitch: [],
-            error: []
+            error: [],
+            primaryChange: []
         };
 
         this.init();
+    }
+
+    /**
+     * 设置多流统计收集器
+     * @param {MultiStreamStatsCollector} multiStreamStats - 多流统计收集器实例
+     */
+    setMultiStreamStats(multiStreamStats) {
+        this.multiStreamStats = multiStreamStats;
+        console.log('多流统计收集器已设置到多视图管理器');
     }
 
     /**
@@ -131,12 +143,23 @@ class MultiViewManager {
         this.currentLayout = layoutType;
         const layout = this.layouts[layoutType];
 
+        // 若主视图索引超出新布局范围，则回退为0并通知外部
+        const prevPrimary = this.primaryIndex;
+        if (this.primaryIndex >= layout.count) {
+            this.primaryIndex = 0;
+        }
+
         try {
             // 更新网格样式
             this.updateGridLayout(layout);
 
             // 创建视频视图
             await this.createVideoViews(layout.count);
+
+            // 若主视图被回退，补发事件，保证上层策略同步
+            if (prevPrimary !== this.primaryIndex) {
+                this.emit('primaryChange', { previousIndex: prevPrimary, newIndex: this.primaryIndex });
+            }
 
             // 触发布局变化事件
             this.emit('layoutChange', {
@@ -191,6 +214,9 @@ class MultiViewManager {
         const viewContainer = document.createElement('div');
         viewContainer.className = 'video-view';
         viewContainer.dataset.index = index;
+        if (index === this.primaryIndex) {
+            viewContainer.classList.add('primary');
+        }
 
         // 创建视频元素
         const videoElement = document.createElement('video');
@@ -221,6 +247,7 @@ class MultiViewManager {
             <div class="view-controls">
                 <button class="view-btn" data-action="connect" data-view="${index}">连接</button>
                 <button class="view-btn" data-action="disconnect" data-view="${index}" style="display:none;">断开</button>
+                <button class="view-btn pin-btn${index === this.primaryIndex ? ' is-primary' : ''}" data-action="primary" data-view="${index}" title="设为主视图">⭐</button>
                 <select class="quality-select" data-view="${index}">
                     <option value="auto">自动</option>
                     <option value="1080p">1080P</option>
@@ -242,6 +269,7 @@ class MultiViewManager {
             index,
             connected: false,
             quality: 'auto',
+            currentRid: null,
             stats: {},
             lastUpdate: Date.now()
         });
@@ -256,6 +284,7 @@ class MultiViewManager {
         const connectBtn = viewContainer.querySelector('[data-action="connect"]');
         const disconnectBtn = viewContainer.querySelector('[data-action="disconnect"]');
         const qualitySelect = viewContainer.querySelector('.quality-select');
+        const pinBtn = viewContainer.querySelector('[data-action="primary"]');
 
         // 连接按钮事件
         connectBtn.addEventListener('click', () => {
@@ -270,6 +299,11 @@ class MultiViewManager {
         // 质量选择事件
         qualitySelect.addEventListener('change', (e) => {
             this.changeViewQuality(index, e.target.value);
+        });
+
+        // 设为主视图
+        pinBtn.addEventListener('click', () => {
+            this.setPrimaryView(index);
         });
     }
 
@@ -292,12 +326,26 @@ class MultiViewManager {
             // 更新状态
             this.updateViewStatus(index, '连接中...');
 
-            // 创建 WebRTC 播放器实例
-            const player = new WebRTCPlayerHTTP(videoElement, {
-                ...this.config.playerConfig,
-                // 每个视图使用不同的流ID（可以配置为同一个流的不同质量）
-                streamPrefix: this.getStreamId(index)
-            });
+            // 根据 provider 选择播放器实例（默认 simulcast）
+            let player;
+            const provider = (this.config.streamConfig.provider || 'simulcast').toLowerCase();
+            if (provider === 'http') {
+                const http = this.config.playerConfig.http || {};
+                player = new WebRTCPlayerHTTP(videoElement, {
+                    apiBaseUrl: http.apiBaseUrl,
+                    streamApp: http.streamApp,
+                    streamPrefix: http.streamPrefix,
+                    streamType: http.streamType || 'play',
+                    qualitySuffix: http.qualitySuffix || '',
+                    iceServers: this.config.playerConfig.iceServers
+                });
+            } else {
+                player = new WebRTCSimulcastPlayer(videoElement, {
+                    apiBaseUrl: this.config.playerConfig.apiBaseUrl,
+                    streamId: this.getStreamId(index),
+                    iceServers: this.config.playerConfig.iceServers
+                });
+            }
 
             // 监听播放器事件
             this.bindPlayerEvents(player, index);
@@ -307,20 +355,19 @@ class MultiViewManager {
 
             // 获取推荐质量
             const quality = this.getRecommendedQuality(index);
-            
-            // 连接播放器
+
             await player.connect(quality);
 
-            // 更新视图状态
             const viewStats = this.viewStats.get(viewId);
             viewStats.connected = true;
-            viewStats.quality = quality;
+            viewStats.quality = 'auto';
+            viewStats.currentRid = player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null) || quality;
             this.activeStreams.add(viewId);
 
-            // 更新UI
             this.updateViewControls(index, true);
             this.updateViewStatus(index, '已连接');
-            this.updateViewQuality(index, quality);
+            this.updateViewQuality(index, player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null) || quality);
+            this.updateQualitySelector(index, 'auto');
 
             console.log(`视图 ${index} 连接成功`);
 
@@ -342,7 +389,7 @@ class MultiViewManager {
         if (player) {
             console.log(`断开视图 ${index}...`);
 
-            // 断开播放器
+            player.stopAdaptiveControl();
             player.disconnect();
             player.destroy();
 
@@ -353,7 +400,21 @@ class MultiViewManager {
             const viewStats = this.viewStats.get(viewId);
             if (viewStats) {
                 viewStats.connected = false;
+                viewStats.quality = 'auto';
+                viewStats.currentRid = null;
                 viewStats.stats = {};
+                
+                // 停止统计采集器
+                if (viewStats.statsCollector) {
+                    viewStats.statsCollector.stop();
+                    viewStats.statsCollector = null;
+                }
+                
+                // 从多流统计收集器中移除
+                if (this.multiStreamStats) {
+                    this.multiStreamStats.removeStream(viewId);
+                    console.log(`视图 ${index} 已从多流统计收集器中移除`);
+                }
             }
 
             // 更新UI
@@ -382,21 +443,31 @@ class MultiViewManager {
         try {
             console.log(`视图 ${index} 切换质量: ${quality}`);
 
+            this.updateQualitySelector(index, quality);
+
+            const viewStats = this.viewStats.get(viewId);
+
             if (quality === 'auto') {
-                // 启用自动质量
-                const recommendedQuality = this.getRecommendedQuality(index);
-                await player.switchQuality(recommendedQuality);
+                if (typeof player.startAdaptiveControl === 'function') {
+                    player.startAdaptiveControl();
+                }
+                if (viewStats) {
+                    viewStats.quality = 'auto';
+                    viewStats.currentRid = player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null);
+                }
+                this.updateViewQuality(index, player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null));
             } else {
-                // 手动质量
+                if (typeof player.stopAdaptiveControl === 'function') {
+                    player.stopAdaptiveControl();
+                }
                 await player.switchQuality(quality);
+                if (viewStats) {
+                    viewStats.quality = quality;
+                    viewStats.currentRid = player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null);
+                }
+                this.updateViewQuality(index, player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null));
             }
 
-            // 更新状态
-            const viewStats = this.viewStats.get(viewId);
-            viewStats.quality = quality;
-            this.updateViewQuality(index, quality);
-
-            // 触发质量切换事件
             this.emit('qualitySwitch', {
                 viewIndex: index,
                 quality,
@@ -405,21 +476,24 @@ class MultiViewManager {
 
         } catch (error) {
             console.error(`视图 ${index} 质量切换失败:`, error);
+            this.updateViewStatus(index, '质量切换失败');
         }
     }
 
     /**
      * 绑定播放器事件
-     * @param {WebRTCPlayerHTTP} player - 播放器实例
+     * @param {WebRTCSimulcastPlayer} player - 播放器实例
      * @param {number} index - 视图索引
      */
     bindPlayerEvents(player, index) {
         const viewId = `view_${index}`;
 
-        // 状态变化
         player.on('stateChange', (event) => {
-            const { state, quality } = event;
-            console.log(`视图 ${index} 状态变化:`, state, quality);
+            const { state, rid } = event;
+            console.log(`视图 ${index} 状态变化:`, state, rid);
+
+            const viewId = `view_${index}`;
+            const viewStats = this.viewStats.get(viewId);
 
             switch (state) {
                 case 'connecting':
@@ -427,9 +501,11 @@ class MultiViewManager {
                     break;
                 case 'connected':
                     this.updateViewStatus(index, '已连接');
-                    if (quality) {
-                        this.updateViewQuality(index, quality);
+                    if (viewStats) {
+                        viewStats.currentRid = rid || player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null);
                     }
+                    this.updateViewQuality(index, rid || player.currentRid || (player.getCurrentQuality ? player.getCurrentQuality() : null));
+                    this.setupViewStatsCollection(index, player.getPeerConnection ? player.getPeerConnection() : null);
                     break;
                 case 'disconnected':
                     this.updateViewStatus(index, '未连接');
@@ -440,13 +516,25 @@ class MultiViewManager {
             }
         });
 
-        // 统计就绪
-        player.on('statsReady', (peerConnection) => {
-            console.log(`视图 ${index} 统计就绪`);
-            this.setupViewStatsCollection(index, peerConnection);
+        player.on('qualityChanged', (event) => {
+            const viewId = `view_${index}`;
+            const viewStats = this.viewStats.get(viewId);
+            if (viewStats) {
+                viewStats.currentRid = event.newRid || (player.getCurrentQuality ? player.getCurrentQuality() : null);
+            }
+            this.updateViewQuality(index, event.newRid || (player.getCurrentQuality ? player.getCurrentQuality() : null));
         });
 
-        // 错误处理
+        // Simulcast: track 事件；HTTP: statsReady 携带 PeerConnection
+        if (typeof player.on === 'function') {
+            player.on('track', () => {
+                this.setupViewStatsCollection(index, player.getPeerConnection ? player.getPeerConnection() : null);
+            });
+            player.on('statsReady', (pc) => {
+                this.setupViewStatsCollection(index, pc || (player.getPeerConnection ? player.getPeerConnection() : null));
+            });
+        }
+
         player.on('error', (event) => {
             console.error(`视图 ${index} 播放器错误:`, event);
             this.updateViewStatus(index, '错误');
@@ -460,22 +548,40 @@ class MultiViewManager {
      */
     setupViewStatsCollection(index, peerConnection) {
         const viewId = `view_${index}`;
-        
-        // 创建统计采集器
+        if (!peerConnection) {
+            return;
+        }
+
+        const viewStats = this.viewStats.get(viewId);
+        if (!viewStats) {
+            return;
+        }
+
+        if (viewStats.statsCollector && viewStats.statsCollector.peerConnection === peerConnection) {
+            return;
+        }
+
+        if (viewStats.statsCollector) {
+            viewStats.statsCollector.stop();
+            viewStats.statsCollector.destroy();
+        }
+
         const statsCollector = new WebRTCStatsCollector(peerConnection, 1000);
-        
-        // 监听统计数据
         statsCollector.addListener((data) => {
             this.updateViewStats(index, data);
         });
-
-        // 启动采集
         statsCollector.start();
 
-        // 保存采集器实例（用于清理）
-        const viewStats = this.viewStats.get(viewId);
-        if (viewStats) {
-            viewStats.statsCollector = statsCollector;
+        viewStats.statsCollector = statsCollector;
+
+        if (this.multiStreamStats) {
+            this.multiStreamStats.addStream(viewId, statsCollector, {
+                viewIndex: index,
+                quality: viewStats.quality || 'auto',
+                rid: viewStats.currentRid,
+                priority: index === this.primaryIndex ? 'high' : 'normal'
+            });
+            console.log(`视图 ${index} 已注册到多流统计收集器`);
         }
     }
 
@@ -748,6 +854,25 @@ class MultiViewManager {
         }
     }
 
+    getDisplayQualityLabel(value) {
+        if (!value) {
+            return '--';
+        }
+
+        const normalized = value.toString().toLowerCase();
+        const mapping = {
+            'high': '1080P',
+            '1080p': '1080P',
+            'medium': '720P',
+            '720p': '720P',
+            'low': '480P',
+            '480p': '480P',
+            '--': '--'
+        };
+
+        return mapping[normalized] || value.toString().toUpperCase();
+    }
+
     /**
      * 获取流ID
      * @param {number} index - 视图索引
@@ -755,7 +880,7 @@ class MultiViewManager {
      */
     getStreamId(index) {
         // 可以配置为使用不同的流或同一个流
-        const baseStream = this.config.streamConfig.baseStreamId || 'stream/wrj/pri/8UUXN4R00A06RS_165-0-7';
+        const baseStream = this.config.streamConfig.baseStreamId || 'webrtc://localhost/live/stream';
         
         if (this.config.streamConfig.useMultipleStreams) {
             // 使用多个不同的流
@@ -764,6 +889,47 @@ class MultiViewManager {
             // 使用同一个流（服务器自动适配不同质量）
             return baseStream;
         }
+    }
+
+    updateQualitySelector(index, value) {
+        const select = this.gridContainer.querySelector(`.quality-select[data-view="${index}"]`);
+        if (select) {
+            select.value = value;
+        }
+    }
+
+    /**
+     * 设置主视图
+     * @param {number} index - 新主视图索引
+     */
+    setPrimaryView(index) {
+        if (index === this.primaryIndex) return;
+
+        const previous = this.primaryIndex;
+        this.primaryIndex = index;
+
+        // 更新UI高亮与按钮样式
+        const prevContainer = this.gridContainer.querySelector(`[data-index="${previous}"]`);
+        const newContainer = this.gridContainer.querySelector(`[data-index="${index}"]`);
+        if (prevContainer) {
+            prevContainer.classList.remove('primary');
+            const prevPin = prevContainer.querySelector('[data-action="primary"]');
+            if (prevPin) prevPin.classList.remove('is-primary');
+        }
+        if (newContainer) {
+            newContainer.classList.add('primary');
+            const newPin = newContainer.querySelector('[data-action="primary"]');
+            if (newPin) newPin.classList.add('is-primary');
+        }
+
+        // 更新多流统计中的优先级元数据
+        if (this.multiStreamStats) {
+            this.multiStreamStats.updateStreamMetadata?.(`view_${previous}`, { priority: 'normal' });
+            this.multiStreamStats.updateStreamMetadata?.(`view_${index}`, { priority: 'high' });
+        }
+
+        // 触发事件，供应用层/智能控制器联动
+        this.emit('primaryChange', { previousIndex: previous, newIndex: index });
     }
 
     /**
@@ -806,9 +972,15 @@ class MultiViewManager {
      */
     updateViewQuality(index, quality) {
         const qualityElement = document.getElementById(`quality_${index}`);
-        if (qualityElement) {
-            qualityElement.textContent = quality;
+        const viewStats = this.viewStats.get(`view_${index}`);
+        if (!qualityElement || !viewStats) {
+            return;
         }
+
+        const label = this.getDisplayQualityLabel(quality || viewStats.currentRid);
+        qualityElement.textContent = viewStats.quality === 'auto'
+            ? `自动 (${label})`
+            : label;
     }
 
     /**
